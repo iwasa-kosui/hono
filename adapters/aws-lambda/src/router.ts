@@ -78,7 +78,8 @@ const isHonoApp = (value: unknown): value is Hono<any, any, any> =>
  * source, `handle` rejects. In Lambda a thrown error marks the invocation as failed,
  * so asynchronous sources such as SQS or SNS are retried.
  *
- * Each source check is mutually exclusive, so the order does not affect the result.
+ * Sources are checked in the order sqs, sns, s3, dynamodb, eventBridge, http,
+ * and the first matching handler is called. HTTP is evaluated last because its check is the most generic.
  * Only the registered sources are checked.
  *
  * @example
