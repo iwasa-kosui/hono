@@ -196,7 +196,7 @@ export const streamHandle = <
   )
 }
 
-type HandleOptions = {
+export type HandleOptions = {
   isContentTypeBinary: ((contentType: string) => boolean) | undefined
 }
 
