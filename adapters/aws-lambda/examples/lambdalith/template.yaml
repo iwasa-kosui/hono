@@ -1,0 +1,134 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: One Lambda (Lambdalith) receiving S3, EventBridge Scheduler, REST API and HTTP API events
+
+Parameters:
+  UploadsBucketName:
+    Type: String
+    Description: Globally unique name of the uploads bucket
+  ReportsBucketName:
+    Type: String
+    Description: Globally unique name of the reports bucket
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 30
+    MemorySize: 256
+
+Resources:
+  UploadsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref UploadsBucketName
+
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ReportsBucketName
+
+  LambdalithFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Target: es2022
+        Sourcemap: true
+        EntryPoints:
+          - index.ts
+    Properties:
+      CodeUri: .
+      Handler: index.handler
+      Environment:
+        Variables:
+          # Bucket names are passed as parameters (not Ref'd from the buckets)
+          # to avoid a circular dependency with the S3 event sources below.
+          UPLOADS_BUCKET: !Ref UploadsBucketName
+          REPORTS_BUCKET: !Ref ReportsBucketName
+      Events:
+        UploadsCreated:
+          Type: S3
+          Properties:
+            Bucket: !Ref UploadsBucket
+            Events: s3:ObjectCreated:*
+        ReportsCreated:
+          Type: S3
+          Properties:
+            Bucket: !Ref ReportsBucket
+            Events: s3:ObjectCreated:*
+        # HTTP API (payload v2)
+        Health:
+          Type: HttpApi
+          Properties:
+            Path: /health
+            Method: GET
+        CreateUpload:
+          Type: HttpApi
+          Properties:
+            Path: /uploads
+            Method: POST
+        # REST API (payload v1)
+        GetUser:
+          Type: Api
+          Properties:
+            Path: /users/{id}
+            Method: GET
+        StripeWebhook:
+          Type: Api
+          Properties:
+            Path: /webhooks/stripe
+            Method: POST
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambdalith
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt LambdalithFunction.Arn
+
+  # EventBridge Scheduler passes `Input` to the function as-is (no event envelope).
+  # Each Input has `source`, `detail-type` and `detail` so that LambdaRouter routes it to `eventBridge`.
+  DailyReportSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      ScheduleExpression: cron(0 1 * * ? *)
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt LambdalithFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"source":"myapp.scheduler","detail-type":"daily-report","detail":{"target":"sales"}}'
+
+  SessionCleanupSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      ScheduleExpression: rate(1 hour)
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt LambdalithFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"source":"myapp.scheduler","detail-type":"session-cleanup","detail":{"maxAgeHours":24}}'
+
+  BillingReminderSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      ScheduleExpression: cron(0 9 ? * MON *)
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt LambdalithFunction.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: '{"source":"myapp.scheduler","detail-type":"billing-reminder","detail":{"daysBeforeDue":3}}'
